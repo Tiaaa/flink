@@ -18,6 +18,16 @@
 
 package org.apache.flink.connector.file.src.impl;
 
+import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.empty;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThat;
+
+import java.io.File;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.util.Collections;
+import java.util.concurrent.TimeUnit;
 import org.apache.flink.api.connector.source.SplitEnumeratorContext;
 import org.apache.flink.connector.file.src.FileSourceSplit;
 import org.apache.flink.connector.file.src.assigners.SimpleSplitAssigner;
@@ -25,16 +35,8 @@ import org.apache.flink.connector.file.src.enumerate.FileEnumerator;
 import org.apache.flink.connector.file.src.testutils.TestingFileEnumerator;
 import org.apache.flink.connector.testutils.source.reader.TestingSplitEnumeratorContext;
 import org.apache.flink.core.fs.Path;
-
+import org.apache.flink.util.StringUtils;
 import org.junit.Test;
-
-import java.io.File;
-import java.util.Collections;
-
-import static org.hamcrest.Matchers.contains;
-import static org.hamcrest.Matchers.empty;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertThat;
 
 /** Unit tests for the {@link ContinuousFileSplitEnumerator}. */
 public class ContinuousFileSplitEnumeratorTest {
@@ -105,6 +107,40 @@ public class ContinuousFileSplitEnumeratorTest {
         assertThat(enumerator.snapshotState(1L).getSplits(), contains(split));
     }
 
+    @Test
+    public void testDiscoverExpiredSplit() throws Exception {
+        final TestingFileEnumerator fileEnumerator = new TestingFileEnumerator();
+        final TestingSplitEnumeratorContext<FileSourceSplit> context =
+                new TestingSplitEnumeratorContext<>(4);
+        final ContinuousFileSplitEnumerator enumerator = createEnumerator(fileEnumerator, context);
+
+        // register one reader, and let it request a split
+        context.registerReader(2, "localhost");
+        enumerator.addReader(2);
+        enumerator.handleSplitRequest(2, "localhost");
+
+        // initialize with one split to update watermark
+        LocalDateTime now = LocalDateTime.now();
+        long current = now.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
+        final FileSourceSplit split = createRandomSplitWithTime(current, "file1");
+        fileEnumerator.addSplits(split);
+        context.triggerAllActions();
+
+        assertThat(enumerator.snapshotState(1L).getSplits(), empty());
+        assertThat(context.getSplitAssignments().get(2).getAssignedSplits(), contains(split));
+
+        // split within expiration would be added
+        context.registerReader(3, "localhost");
+        enumerator.addReader(3);
+        enumerator.handleSplitRequest(3, "localhost");
+        long oneDayAgo = now.minusDays(1).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
+        final FileSourceSplit oldSplit = createRandomSplitWithTime(oneDayAgo, "file2");
+        fileEnumerator.addSplits(oldSplit);
+        context.triggerAllActions();
+
+        assertThat(context.getSplitAssignments().get(3).getAssignedSplits(), contains(oldSplit));
+    }
+
     // ------------------------------------------------------------------------
     //  test setup helpers
     // ------------------------------------------------------------------------
@@ -112,6 +148,17 @@ public class ContinuousFileSplitEnumeratorTest {
     private static FileSourceSplit createRandomSplit() {
         return new FileSourceSplit(
                 String.valueOf(splitId++), Path.fromLocalFile(new File(TMP_DIR, "foo")), 0L, 0L);
+    }
+
+    private static FileSourceSplit createRandomSplitWithTime(
+            long modificationTime, String fileName) {
+        return new FileSourceSplit(
+                String.valueOf(splitId++),
+                Path.fromLocalFile(new File(TMP_DIR, fileName)),
+                0L,
+                0L,
+                StringUtils.EMPTY_STRING_ARRAY,
+                modificationTime);
     }
 
     private static ContinuousFileSplitEnumerator createEnumerator(
@@ -124,8 +171,9 @@ public class ContinuousFileSplitEnumeratorTest {
                         fileEnumerator,
                         new SimpleSplitAssigner(Collections.emptyList()),
                         new Path[] {Path.fromLocalFile(TMP_DIR)},
-                        Collections.emptySet(),
-                        10L);
+                        Collections.emptyMap(),
+                        10L,
+                        TimeUnit.DAYS.toMillis(7));
         enumerator.start();
         return enumerator;
     }

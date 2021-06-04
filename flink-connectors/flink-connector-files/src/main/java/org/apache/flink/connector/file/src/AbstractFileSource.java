@@ -18,6 +18,16 @@
 
 package org.apache.flink.connector.file.src;
 
+import static org.apache.flink.connector.file.src.impl.ContinuousFileSplitEnumerator.INITIAL_WATERMARK;
+import static org.apache.flink.util.Preconditions.checkArgument;
+import static org.apache.flink.util.Preconditions.checkNotNull;
+
+import java.io.IOException;
+import java.time.Duration;
+import java.util.Collection;
+import java.util.Map;
+import java.util.stream.Collectors;
+import javax.annotation.Nullable;
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.connector.source.Boundedness;
@@ -38,17 +48,6 @@ import org.apache.flink.connector.file.src.reader.StreamFormat;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.core.io.SimpleVersionedSerializer;
 import org.apache.flink.util.FlinkRuntimeException;
-
-import javax.annotation.Nullable;
-
-import java.io.IOException;
-import java.time.Duration;
-import java.util.Collection;
-import java.util.HashSet;
-import java.util.stream.Collectors;
-
-import static org.apache.flink.util.Preconditions.checkArgument;
-import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
  * The base class for File Sources. The main implementation to use is the {@link FileSource}, which
@@ -186,7 +185,7 @@ public abstract class AbstractFileSource<T, SplitT extends FileSourceSplit>
             SplitEnumeratorContext<SplitT> context,
             FileEnumerator enumerator,
             Collection<FileSourceSplit> splits,
-            @Nullable Collection<Path> alreadyProcessedPaths) {
+            @Nullable Map<Path, Long> alreadyProcessedPaths) {
 
         // cast this to a collection of FileSourceSplit because the enumerator code work
         // non-generically just on that base split type
@@ -212,7 +211,8 @@ public abstract class AbstractFileSource<T, SplitT extends FileSourceSplit>
                             splitAssigner,
                             inputPaths,
                             alreadyProcessedPaths,
-                            continuousEnumerationSettings.getDiscoveryInterval().toMillis()));
+                            continuousEnumerationSettings.getDiscoveryInterval().toMillis(),
+                            continuousEnumerationSettings.getFileExpireTime().toMillis()));
         }
     }
 
@@ -226,10 +226,15 @@ public abstract class AbstractFileSource<T, SplitT extends FileSourceSplit>
                 (SplitEnumerator<?, ?>) enumerator;
     }
 
-    private static Collection<Path> splitsToPaths(Collection<FileSourceSplit> splits) {
+    private static Map<Path, Long> splitsToPaths(Collection<FileSourceSplit> splits) {
         return splits.stream()
-                .map(FileSourceSplit::path)
-                .collect(Collectors.toCollection(HashSet::new));
+                .collect(
+                        Collectors.toMap(
+                                FileSourceSplit::path,
+                                v ->
+                                        v.getModificationTime().isPresent()
+                                                ? v.getModificationTime().get()
+                                                : INITIAL_WATERMARK));
     }
 
     // ------------------------------------------------------------------------

@@ -18,20 +18,18 @@
 
 package org.apache.flink.connector.file.src;
 
+import static org.apache.flink.util.Preconditions.checkArgument;
+import static org.apache.flink.util.Preconditions.checkNotNull;
+
+import java.io.Serializable;
+import java.util.Arrays;
+import java.util.Optional;
+import javax.annotation.Nullable;
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.api.connector.source.SourceSplit;
 import org.apache.flink.connector.file.src.util.CheckpointedPosition;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.util.StringUtils;
-
-import javax.annotation.Nullable;
-
-import java.io.Serializable;
-import java.util.Arrays;
-import java.util.Optional;
-
-import static org.apache.flink.util.Preconditions.checkArgument;
-import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
  * A {@link SourceSplit} that represents a file, or a region of a file.
@@ -82,6 +80,9 @@ public class FileSourceSplit implements SourceSplit, Serializable {
      */
     @Nullable transient byte[] serializedFormCache;
 
+    /** The modification time of the file. */
+    @Nullable private final Long modificationTime;
+
     // --------------------------------------------------------------------------------------------
 
     /**
@@ -128,6 +129,24 @@ public class FileSourceSplit implements SourceSplit, Serializable {
     }
 
     /**
+     * Constructs a split with host information.
+     *
+     * @param filePath The path to the file.
+     * @param offset The start (inclusive) of the split's rage in the file.
+     * @param length The number of bytes in the split (starting from the offset)
+     * @param hostnames The hostnames of the nodes storing the split's file range.
+     */
+    public FileSourceSplit(
+            String id,
+            Path filePath,
+            long offset,
+            long length,
+            String[] hostnames,
+            @Nullable Long modificationTime) {
+        this(id, filePath, offset, length, hostnames, null, null, modificationTime);
+    }
+
+    /**
      * Package private constructor, used by the serializers to directly cache the serialized form.
      */
     FileSourceSplit(
@@ -138,6 +157,19 @@ public class FileSourceSplit implements SourceSplit, Serializable {
             String[] hostnames,
             @Nullable CheckpointedPosition readerPosition,
             @Nullable byte[] serializedForm) {
+        this(id, filePath, offset, length, hostnames, readerPosition, serializedForm, null);
+    }
+
+    /** Package private constructor */
+    FileSourceSplit(
+            String id,
+            Path filePath,
+            long offset,
+            long length,
+            String[] hostnames,
+            @Nullable CheckpointedPosition readerPosition,
+            @Nullable byte[] serializedForm,
+            @Nullable Long modificationTime) {
 
         checkArgument(offset >= 0, "offset must be >= 0");
         checkArgument(length >= 0, "length must be >= 0");
@@ -150,6 +182,7 @@ public class FileSourceSplit implements SourceSplit, Serializable {
         this.hostnames = hostnames;
         this.readerPosition = readerPosition;
         this.serializedFormCache = serializedForm;
+        this.modificationTime = modificationTime;
     }
 
     // ------------------------------------------------------------------------
@@ -196,6 +229,10 @@ public class FileSourceSplit implements SourceSplit, Serializable {
      */
     public Optional<CheckpointedPosition> getReaderPosition() {
         return Optional.ofNullable(readerPosition);
+    }
+
+    public Optional<Long> getModificationTime() {
+        return Optional.ofNullable(modificationTime);
     }
 
     /**

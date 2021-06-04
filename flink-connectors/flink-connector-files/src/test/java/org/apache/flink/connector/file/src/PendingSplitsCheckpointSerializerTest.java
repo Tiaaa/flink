@@ -18,21 +18,21 @@
 
 package org.apache.flink.connector.file.src;
 
-import org.apache.flink.core.fs.Path;
-import org.apache.flink.core.io.SimpleVersionedSerialization;
+import static org.apache.flink.connector.file.src.impl.ContinuousFileSplitEnumerator.INITIAL_WATERMARK;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertSame;
 
-import org.junit.Assert;
-import org.junit.Test;
-
+import com.google.common.collect.ImmutableMap;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.function.BiConsumer;
-
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertSame;
+import org.apache.flink.core.fs.Path;
+import org.apache.flink.core.io.SimpleVersionedSerialization;
+import org.junit.Assert;
+import org.junit.Test;
 
 /** Unit tests for the {@link FileSourceSplitSerializer}. */
 public class PendingSplitsCheckpointSerializerTest {
@@ -65,10 +65,13 @@ public class PendingSplitsCheckpointSerializerTest {
         final PendingSplitsCheckpoint<FileSourceSplit> checkpoint =
                 PendingSplitsCheckpoint.fromCollectionSnapshot(
                         Arrays.asList(testSplit1(), testSplit2(), testSplit3()),
-                        Arrays.asList(
+                        ImmutableMap.of(
                                 new Path("file:/some/path"),
+                                INITIAL_WATERMARK,
                                 new Path("s3://bucket/key/and/path"),
-                                new Path("hdfs://namenode:12345/path")));
+                                INITIAL_WATERMARK,
+                                new Path("hdfs://namenode:12345/path"),
+                                INITIAL_WATERMARK));
 
         final PendingSplitsCheckpoint<FileSourceSplit> deSerialized =
                 serializeAndDeserialize(checkpoint);

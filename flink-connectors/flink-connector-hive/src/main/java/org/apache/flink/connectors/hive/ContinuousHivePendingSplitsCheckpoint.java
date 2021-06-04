@@ -37,7 +37,7 @@ public class ContinuousHivePendingSplitsCheckpoint
             Collection<HiveSourceSplit> splits,
             Comparable<?> currentReadOffset,
             Collection<List<String>> seenPartitionsSinceOffset) {
-        super(new ArrayList<>(splits), Collections.emptyList());
+        super(new ArrayList<>(splits), Collections.emptyMap());
         this.currentReadOffset = currentReadOffset;
         this.seenPartitionsSinceOffset =
                 Collections.unmodifiableCollection(new ArrayList<>(seenPartitionsSinceOffset));

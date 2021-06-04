@@ -18,9 +18,8 @@
 
 package org.apache.flink.connector.file.src;
 
-import org.apache.flink.annotation.PublicEvolving;
-import org.apache.flink.core.fs.Path;
-import org.apache.flink.core.io.SimpleVersionedSerializer;
+import static org.apache.flink.util.Preconditions.checkArgument;
+import static org.apache.flink.util.Preconditions.checkNotNull;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -28,18 +27,22 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
-
-import static org.apache.flink.util.Preconditions.checkArgument;
-import static org.apache.flink.util.Preconditions.checkNotNull;
+import java.util.HashMap;
+import java.util.Map;
+import org.apache.flink.annotation.PublicEvolving;
+import org.apache.flink.core.fs.Path;
+import org.apache.flink.core.io.SimpleVersionedSerializer;
+import org.apache.flink.shaded.guava18.com.google.common.primitives.Longs;
 
 /** A serializer for the {@link PendingSplitsCheckpoint}. */
 @PublicEvolving
 public final class PendingSplitsCheckpointSerializer<T extends FileSourceSplit>
         implements SimpleVersionedSerializer<PendingSplitsCheckpoint<T>> {
 
-    private static final int VERSION = 1;
+    private static final int VERSION = 2;
 
     private static final int VERSION_1_MAGIC_NUMBER = 0xDEADBEEF;
+    private static final int VERSION_2_MAGIC_NUMBER = 0xDECAF147;
 
     private final SimpleVersionedSerializer<T> splitSerializer;
 
@@ -67,13 +70,15 @@ public final class PendingSplitsCheckpointSerializer<T extends FileSourceSplit>
 
         final SimpleVersionedSerializer<T> splitSerializer = this.splitSerializer; // stack cache
         final Collection<T> splits = checkpoint.getSplits();
-        final Collection<Path> processedPaths = checkpoint.getAlreadyProcessedPaths();
+        final Map<Path, Long> processedPaths = checkpoint.getAlreadyProcessedPaths();
+        final Long fileWatermark = checkpoint.getFileWatermark();
 
         final ArrayList<byte[]> serializedSplits = new ArrayList<>(splits.size());
-        final ArrayList<byte[]> serializedPaths = new ArrayList<>(processedPaths.size());
+        final HashMap<byte[], byte[]> serializedPaths = new HashMap<>(processedPaths.size());
 
         int totalLen =
-                16; // four ints: magic, version of split serializer, count splits, count paths
+                24; // four ints: magic, version of split serializer, count splits, count paths,
+        // watemark
 
         for (T split : splits) {
             final byte[] serSplit = splitSerializer.serialize(split);
@@ -81,15 +86,16 @@ public final class PendingSplitsCheckpointSerializer<T extends FileSourceSplit>
             totalLen += serSplit.length + 4; // 4 bytes for the length field
         }
 
-        for (Path path : processedPaths) {
-            final byte[] serPath = path.toString().getBytes(StandardCharsets.UTF_8);
-            serializedPaths.add(serPath);
-            totalLen += serPath.length + 4; // 4 bytes for the length field
+        for (Map.Entry<Path, Long> entry : processedPaths.entrySet()) {
+            final byte[] serPath = entry.getKey().toString().getBytes(StandardCharsets.UTF_8);
+            final byte[] serWatemar = Longs.toByteArray(entry.getValue());
+            serializedPaths.put(serPath, serWatemar);
+            totalLen += serPath.length + serWatemar.length + 4 + 4; // 4 bytes for the length field
         }
 
         final byte[] result = new byte[totalLen];
         final ByteBuffer byteBuffer = ByteBuffer.wrap(result).order(ByteOrder.LITTLE_ENDIAN);
-        byteBuffer.putInt(VERSION_1_MAGIC_NUMBER);
+        byteBuffer.putInt(VERSION_2_MAGIC_NUMBER);
         byteBuffer.putInt(splitSerializer.getVersion());
         byteBuffer.putInt(serializedSplits.size());
         byteBuffer.putInt(serializedPaths.size());
@@ -99,10 +105,14 @@ public final class PendingSplitsCheckpointSerializer<T extends FileSourceSplit>
             byteBuffer.put(splitBytes);
         }
 
-        for (byte[] pathBytes : serializedPaths) {
-            byteBuffer.putInt(pathBytes.length);
-            byteBuffer.put(pathBytes);
+        for (Map.Entry<byte[], byte[]> entry : serializedPaths.entrySet()) {
+            byteBuffer.putInt(entry.getKey().length);
+            byteBuffer.put(entry.getKey());
+            byteBuffer.putInt(entry.getValue().length);
+            byteBuffer.put(entry.getValue());
         }
+
+        byteBuffer.putLong(fileWatermark);
 
         assert byteBuffer.remaining() == 0;
 
@@ -118,6 +128,8 @@ public final class PendingSplitsCheckpointSerializer<T extends FileSourceSplit>
             throws IOException {
         if (version == 1) {
             return deserializeV1(serialized);
+        } else if (version == 2) {
+            return deserializeV2(serialized);
         }
         throw new IOException("Unknown version: " + version);
     }
@@ -157,5 +169,47 @@ public final class PendingSplitsCheckpointSerializer<T extends FileSourceSplit>
         }
 
         return PendingSplitsCheckpoint.reusingCollection(splits, paths);
+    }
+
+    private PendingSplitsCheckpoint<T> deserializeV2(byte[] serialized) throws IOException {
+        final ByteBuffer bb = ByteBuffer.wrap(serialized).order(ByteOrder.LITTLE_ENDIAN);
+
+        final int magic = bb.getInt();
+        if (magic != VERSION_2_MAGIC_NUMBER) {
+            throw new IOException(
+                    String.format(
+                            "Invalid magic number for PendingSplitsCheckpoint. "
+                                    + "Expected: %X , found %X",
+                            VERSION_2_MAGIC_NUMBER, magic));
+        }
+
+        final int splitSerializerVersion = bb.getInt();
+        final int numSplits = bb.getInt();
+        final int numPaths = bb.getInt();
+
+        final SimpleVersionedSerializer<T> splitSerializer = this.splitSerializer; // stack cache
+        final ArrayList<T> splits = new ArrayList<>(numSplits);
+        final HashMap<Path, Long> paths = new HashMap<>(numPaths);
+
+        for (int remaining = numSplits; remaining > 0; remaining--) {
+            final byte[] bytes = new byte[bb.getInt()];
+            bb.get(bytes);
+            final T split = splitSerializer.deserialize(splitSerializerVersion, bytes);
+            splits.add(split);
+        }
+
+        for (int remaining = numPaths; remaining > 0; remaining--) {
+            final byte[] pathBytes = new byte[bb.getInt()];
+            bb.get(pathBytes);
+            final Path path = new Path(new String(pathBytes, StandardCharsets.UTF_8));
+            final byte[] watermarkBytes = new byte[bb.getInt()];
+            bb.get(watermarkBytes);
+            long watermark = Longs.fromByteArray(watermarkBytes);
+            paths.put(path, watermark);
+        }
+
+        long watermark = bb.getLong();
+
+        return PendingSplitsCheckpoint.reusingCollection(splits, paths, watermark);
     }
 }

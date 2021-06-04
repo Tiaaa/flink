@@ -18,6 +18,20 @@
 
 package org.apache.flink.connector.file.src.impl;
 
+import static java.lang.Math.max;
+import static org.apache.flink.util.Preconditions.checkArgument;
+import static org.apache.flink.util.Preconditions.checkNotNull;
+
+import java.io.IOException;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
+import javax.annotation.Nullable;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.connector.source.SourceEvent;
 import org.apache.flink.api.connector.source.SplitEnumerator;
@@ -27,24 +41,8 @@ import org.apache.flink.connector.file.src.PendingSplitsCheckpoint;
 import org.apache.flink.connector.file.src.assigners.FileSplitAssigner;
 import org.apache.flink.connector.file.src.enumerate.FileEnumerator;
 import org.apache.flink.core.fs.Path;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import javax.annotation.Nullable;
-
-import java.io.IOException;
-import java.util.Collection;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.stream.Collectors;
-
-import static org.apache.flink.util.Preconditions.checkArgument;
-import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /** A continuously monitoring enumerator. */
 @Internal
@@ -59,13 +57,19 @@ public class ContinuousFileSplitEnumerator
 
     private final FileEnumerator enumerator;
 
-    private final HashSet<Path> pathsAlreadyProcessed;
+    private final HashMap<Path, Long> pathsAlreadyProcessed;
 
     private final LinkedHashMap<Integer, String> readersAwaitingSplit;
 
     private final Path[] paths;
 
     private final long discoveryInterval;
+
+    private final long fileExpireTime;
+
+    private long fileWatermark;
+
+    public static final long INITIAL_WATERMARK = 0L;
 
     // ------------------------------------------------------------------------
 
@@ -74,8 +78,9 @@ public class ContinuousFileSplitEnumerator
             FileEnumerator enumerator,
             FileSplitAssigner splitAssigner,
             Path[] paths,
-            Collection<Path> alreadyDiscoveredPaths,
-            long discoveryInterval) {
+            Map<Path, Long> alreadyDiscoveredPaths,
+            long discoveryInterval,
+            long fileExpireTime) {
 
         checkArgument(discoveryInterval > 0L);
         this.context = checkNotNull(context);
@@ -83,8 +88,10 @@ public class ContinuousFileSplitEnumerator
         this.splitAssigner = checkNotNull(splitAssigner);
         this.paths = paths;
         this.discoveryInterval = discoveryInterval;
-        this.pathsAlreadyProcessed = new HashSet<>(alreadyDiscoveredPaths);
+        this.fileExpireTime = fileExpireTime;
+        this.pathsAlreadyProcessed = new HashMap<Path, Long>(alreadyDiscoveredPaths);
         this.readersAwaitingSplit = new LinkedHashMap<>();
+        this.fileWatermark = 0;
     }
 
     @Override
@@ -126,9 +133,10 @@ public class ContinuousFileSplitEnumerator
     @Override
     public PendingSplitsCheckpoint<FileSourceSplit> snapshotState(long checkpointId)
             throws Exception {
+        removeExpired();
         final PendingSplitsCheckpoint<FileSourceSplit> checkpoint =
                 PendingSplitsCheckpoint.fromCollectionSnapshot(
-                        splitAssigner.remainingSplits(), pathsAlreadyProcessed);
+                        splitAssigner.remainingSplits(), pathsAlreadyProcessed, fileWatermark);
 
         LOG.debug("Source Checkpoint is {}", checkpoint);
         return checkpoint;
@@ -143,12 +151,46 @@ public class ContinuousFileSplitEnumerator
         }
 
         final Collection<FileSourceSplit> newSplits =
-                splits.stream()
-                        .filter((split) -> pathsAlreadyProcessed.add(split.path()))
-                        .collect(Collectors.toList());
+                splits.stream().filter(this::shouldProcess).collect(Collectors.toList());
+        updateWatermark(newSplits);
         splitAssigner.addSplits(newSplits);
 
         assignSplits();
+    }
+
+    private boolean shouldProcess(FileSourceSplit split) {
+        boolean present = split.getModificationTime().isPresent();
+        boolean contains;
+        long watermark;
+        if (!present) {
+            contains = pathsAlreadyProcessed.containsKey(split.path());
+            watermark = INITIAL_WATERMARK;
+        } else if (split.getModificationTime().get() < fileWatermark - fileExpireTime) {
+            return false;
+        } else {
+            contains = pathsAlreadyProcessed.containsKey(split.path());
+            watermark = split.getModificationTime().get();
+        }
+        if (!contains) {
+            pathsAlreadyProcessed.put(split.path(), watermark);
+        }
+        return contains;
+    }
+
+    private void updateWatermark(Collection<FileSourceSplit> newSplits) {
+        Optional<Long> minWatermark =
+                newSplits.stream()
+                        .filter(s -> s.getModificationTime().isPresent())
+                        .map(s -> s.getModificationTime().get())
+                        .min(Long::compare);
+        minWatermark.ifPresent(wm -> fileWatermark = max(this.fileWatermark, wm));
+    }
+
+    private void removeExpired() {
+        long threshold = this.fileWatermark - fileExpireTime;
+        pathsAlreadyProcessed
+                .entrySet()
+                .removeIf(e -> e.getValue() != INITIAL_WATERMARK && e.getValue() < threshold);
     }
 
     private void assignSplits() {

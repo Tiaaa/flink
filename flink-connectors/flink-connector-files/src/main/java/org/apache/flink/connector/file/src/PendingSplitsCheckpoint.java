@@ -18,16 +18,18 @@
 
 package org.apache.flink.connector.file.src;
 
-import org.apache.flink.annotation.PublicEvolving;
-import org.apache.flink.core.fs.Path;
-
-import javax.annotation.Nullable;
+import static org.apache.flink.connector.file.src.impl.ContinuousFileSplitEnumerator.INITIAL_WATERMARK;
+import static org.apache.flink.util.Preconditions.checkNotNull;
 
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-
-import static org.apache.flink.util.Preconditions.checkNotNull;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.stream.Collectors;
+import javax.annotation.Nullable;
+import org.apache.flink.annotation.PublicEvolving;
+import org.apache.flink.core.fs.Path;
 
 /**
  * A checkpoint of the current state of the containing the currently pending splits that are not yet
@@ -41,9 +43,16 @@ public class PendingSplitsCheckpoint<SplitT extends FileSourceSplit> {
 
     /**
      * The paths that are no longer in the enumerator checkpoint, but have been processed before and
-     * should this be ignored. Relevant only for sources in continuous monitoring mode.
+     * should this be ignored. Relevant only for sources in continuous monitoring mode. The map
+     * entry key is file path and value is file modification time.
      */
-    private final Collection<Path> alreadyProcessedPaths;
+    private final Map<Path, Long> alreadyProcessedPaths;
+
+    /**
+     * The timestamp of recently discovered files minimum modification time, used to decide when to
+     * expire the files in alreadyProcessedPaths.
+     */
+    private final Long fileWatermark;
 
     /**
      * The cached byte representation from the last serialization step. This helps to avoid paying
@@ -53,9 +62,10 @@ public class PendingSplitsCheckpoint<SplitT extends FileSourceSplit> {
     @Nullable byte[] serializedFormCache;
 
     protected PendingSplitsCheckpoint(
-            Collection<SplitT> splits, Collection<Path> alreadyProcessedPaths) {
+            Collection<SplitT> splits, Map<Path, Long> alreadyProcessedPaths, Long fileWatermark) {
         this.splits = Collections.unmodifiableCollection(splits);
-        this.alreadyProcessedPaths = Collections.unmodifiableCollection(alreadyProcessedPaths);
+        this.alreadyProcessedPaths = Collections.unmodifiableMap(alreadyProcessedPaths);
+        this.fileWatermark = fileWatermark;
     }
 
     // ------------------------------------------------------------------------
@@ -64,21 +74,26 @@ public class PendingSplitsCheckpoint<SplitT extends FileSourceSplit> {
         return splits;
     }
 
-    public Collection<Path> getAlreadyProcessedPaths() {
+    public Map<Path, Long> getAlreadyProcessedPaths() {
         return alreadyProcessedPaths;
+    }
+
+    public Long getFileWatermark() {
+        return fileWatermark;
     }
 
     // ------------------------------------------------------------------------
 
     @Override
     public String toString() {
-        return "PendingSplitsCheckpoint:\n"
-                + "\t\t Pending Splits: "
+        return "PendingSplitsCheckpoint{"
+                + "splits="
                 + splits
-                + '\n'
-                + "\t\t Processed Paths: "
+                + ", alreadyProcessedPaths="
                 + alreadyProcessedPaths
-                + '\n';
+                + ", fileWatermark="
+                + fileWatermark
+                + '}';
     }
 
     // ------------------------------------------------------------------------
@@ -91,22 +106,45 @@ public class PendingSplitsCheckpoint<SplitT extends FileSourceSplit> {
 
         // create a copy of the collection to make sure this checkpoint is immutable
         final Collection<T> copy = new ArrayList<>(splits);
-        return new PendingSplitsCheckpoint<>(copy, Collections.emptySet());
+        return new PendingSplitsCheckpoint<>(copy, Collections.emptyMap(), INITIAL_WATERMARK);
     }
 
     public static <T extends FileSourceSplit> PendingSplitsCheckpoint<T> fromCollectionSnapshot(
-            final Collection<T> splits, final Collection<Path> alreadyProcessedPaths) {
+            final Collection<T> splits, final Map<Path, Long> alreadyProcessedPaths) {
         checkNotNull(splits);
 
         // create a copy of the collection to make sure this checkpoint is immutable
         final Collection<T> splitsCopy = new ArrayList<>(splits);
-        final Collection<Path> pathsCopy = new ArrayList<>(alreadyProcessedPaths);
+        final Map<Path, Long> pathsCopy = new HashMap<>(alreadyProcessedPaths);
 
-        return new PendingSplitsCheckpoint<>(splitsCopy, pathsCopy);
+        return new PendingSplitsCheckpoint<>(splitsCopy, pathsCopy, INITIAL_WATERMARK);
+    }
+
+    public static <T extends FileSourceSplit> PendingSplitsCheckpoint<T> fromCollectionSnapshot(
+            final Collection<T> splits,
+            final Map<Path, Long> alreadyProcessedPaths,
+            final Long fileWatermark) {
+        checkNotNull(splits);
+
+        // create a copy of the collection to make sure this checkpoint is immutable
+        final Collection<T> splitsCopy = new ArrayList<>(splits);
+        final Map<Path, Long> pathsCopy = new HashMap<>(alreadyProcessedPaths);
+
+        return new PendingSplitsCheckpoint<>(splitsCopy, pathsCopy, fileWatermark);
     }
 
     static <T extends FileSourceSplit> PendingSplitsCheckpoint<T> reusingCollection(
             final Collection<T> splits, final Collection<Path> alreadyProcessedPaths) {
-        return new PendingSplitsCheckpoint<>(splits, alreadyProcessedPaths);
+        Map<Path, Long> paths =
+                alreadyProcessedPaths.stream()
+                        .collect(Collectors.toMap(p -> p, p -> INITIAL_WATERMARK));
+        return new PendingSplitsCheckpoint<>(splits, paths, INITIAL_WATERMARK);
+    }
+
+    static <T extends FileSourceSplit> PendingSplitsCheckpoint<T> reusingCollection(
+            final Collection<T> splits,
+            final Map<Path, Long> alreadyProcessedPaths,
+            final Long fileWatermark) {
+        return new PendingSplitsCheckpoint<>(splits, alreadyProcessedPaths, fileWatermark);
     }
 }

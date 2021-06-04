@@ -18,6 +18,7 @@
 
 package org.apache.flink.connector.file.src;
 
+import java.time.temporal.ChronoUnit;
 import org.apache.flink.annotation.Internal;
 
 import java.io.Serializable;
@@ -36,18 +37,32 @@ public final class ContinuousEnumerationSettings implements Serializable {
 
     private final Duration discoveryInterval;
 
+    private final Duration fileExpireTime;
+
     public ContinuousEnumerationSettings(Duration discoveryInterval) {
+        this(discoveryInterval, ChronoUnit.FOREVER.getDuration());
+    }
+
+    public ContinuousEnumerationSettings(Duration discoveryInterval, Duration fileExpireTime) {
         this.discoveryInterval = checkNotNull(discoveryInterval);
+        this.fileExpireTime = checkNotNull(fileExpireTime);
     }
 
     public Duration getDiscoveryInterval() {
         return discoveryInterval;
     }
 
+    public Duration getFileExpireTime() {
+        return fileExpireTime;
+    }
+
     // ------------------------------------------------------------------------
 
     @Override
     public String toString() {
-        return "ContinuousEnumerationSettings{" + "discoveryInterval=" + discoveryInterval + '}';
+        return "ContinuousEnumerationSettings{" +
+            "discoveryInterval=" + discoveryInterval +
+            ", fileExpireTime=" + fileExpireTime +
+            '}';
     }
 }
