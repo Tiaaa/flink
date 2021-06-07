@@ -21,6 +21,7 @@ package org.apache.flink.connector.file.src;
 import static org.apache.flink.connector.file.src.impl.ContinuousFileSplitEnumerator.INITIAL_WATERMARK;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 
 import com.google.common.collect.ImmutableMap;
 import java.io.IOException;
@@ -28,10 +29,10 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
+import java.util.Map;
 import java.util.function.BiConsumer;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.core.io.SimpleVersionedSerialization;
-import org.junit.Assert;
 import org.junit.Test;
 
 /** Unit tests for the {@link FileSourceSplitSerializer}. */
@@ -151,10 +152,11 @@ public class PendingSplitsCheckpointSerializerTest {
                 actual.getSplits(),
                 FileSourceSplitSerializerTest::assertSplitsEqual);
 
-        assertOrderedCollectionEquals(
+        assertMapEquals(
                 expected.getAlreadyProcessedPaths(),
-                actual.getAlreadyProcessedPaths(),
-                Assert::assertEquals);
+                actual.getAlreadyProcessedPaths());
+
+        assertEquals(expected.getFileWatermark(), actual.getFileWatermark());
     }
 
     private static <E> void assertOrderedCollectionEquals(
@@ -165,6 +167,14 @@ public class PendingSplitsCheckpointSerializerTest {
         final Iterator<E> actualIter = actual.iterator();
         while (expectedIter.hasNext()) {
             equalityAsserter.accept(expectedIter.next(), actualIter.next());
+        }
+    }
+
+    private static <K,V> void assertMapEquals(Map<K, V> expected, Map<K, V> actual){
+        assertEquals(expected.size(), actual.size());
+        for (Map.Entry<K, V> expectedEntry : expected.entrySet()) {
+            assertTrue(actual.containsKey(expectedEntry.getKey()));
+            assertEquals(actual.get(expectedEntry.getKey()), expectedEntry.getValue());
         }
     }
 }

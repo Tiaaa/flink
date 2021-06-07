@@ -62,6 +62,11 @@ public class PendingSplitsCheckpoint<SplitT extends FileSourceSplit> {
     @Nullable byte[] serializedFormCache;
 
     protected PendingSplitsCheckpoint(
+        Collection<SplitT> splits, Map<Path, Long> alreadyProcessedPaths) {
+        this(splits, alreadyProcessedPaths, INITIAL_WATERMARK);
+    }
+
+    protected PendingSplitsCheckpoint(
             Collection<SplitT> splits, Map<Path, Long> alreadyProcessedPaths, Long fileWatermark) {
         this.splits = Collections.unmodifiableCollection(splits);
         this.alreadyProcessedPaths = Collections.unmodifiableMap(alreadyProcessedPaths);
